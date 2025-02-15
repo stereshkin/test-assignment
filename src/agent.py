@@ -58,7 +58,7 @@ class Agent:
         )
         self.max_api_calls -= 1
 
-        return completion.choices[0].message
+        return completion.choices[0].message.content
     
     async def extract_relevant_documents(self,
                                          query: str,
