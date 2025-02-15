@@ -70,7 +70,7 @@ class Agent:
         # embed query vector
         response = self.client.embeddings.create(input=[query], model=self.vs.embedding_model)
         query_embedding = response.data[0].embedding
-        normalized_query_embedding = self.vs.normalize_embedding(query_embedding)
+        normalized_query_embedding = VectorStore.normalize_embedding(query_embedding)
         # populate vector store
         await self.vs.populate_vector_store()
         # retrieve all documents within radius
