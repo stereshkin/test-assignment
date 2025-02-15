@@ -129,7 +129,7 @@ class Agent:
             model=self.llm,
             messages=messages
         )
-        return completion.choices[0].message
+        return completion.choices[0].message.content
     
 
     async def _call_llm_async(self, messages: List[dict], semaphore: asyncio.Semaphore):
