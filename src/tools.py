@@ -1,15 +1,23 @@
 import json
 import os
-from vectorstore import VectorStore
+from src.vectorstore import VectorStore
 import numpy as np
 import faiss
-from typing import Literal
+from typing import Literal, Optional
+from src.elasticsearch import ElasticSearchManager
 
 
 class UpdateKnowledgeTool:
     @staticmethod
-    async def run(model_response: str, vs: VectorStore, group: Literal['check', 'update']) -> None:
+    async def run(
+        model_response: str,
+        vs: VectorStore,
+        group: Literal['check', 'update'],
+        elasticsearch_manager: Optional[ElasticSearchManager] = None
+        ) -> None:
+
         modified_knowledge = json.loads(model_response)
+        # Update vector store
         new_documents = []
         ids = []
         for doc in modified_knowledge:
@@ -19,8 +27,29 @@ class UpdateKnowledgeTool:
         assert os.path.exists(vs.index_path)
         vs.index.remove_ids(np.array(ids))
         new_embeddings = await vs.extract_embeddings(documents=new_documents)
-        vs.index.add_with_ids(new_embeddings, ids)
+        vs.index.add_with_ids(np.array(new_embeddings), ids)
         faiss.write_index(vs.index, vs.index_path)
+        # Update elasticsearch index if elasticsearch was used
+        if elasticsearch_manager is not None:
+            documents_to_be_removed = [
+                {
+                    "_id": doc["_id"],
+                    "content": doc["content_before"],
+                    "url": doc["url"]
+                }
+                for doc in modified_knowledge
+            ]
+            documents_to_be_inserted = [
+                {
+                    "_id": doc["_id"],
+                    "content": doc["content_after"],
+                    "url": doc["url"]
+                }
+                for doc in modified_knowledge
+            ]
+
+            elasticsearch_manager.remove_from_index(documents=documents_to_be_removed)
+            elasticsearch_manager.add_to_index(documents=documents_to_be_inserted)
         print(f"The vector store has been updated successfully from the {group} group!")
 
 

@@ -5,15 +5,29 @@ rewrite_query_prompt = """
     explaining what kind of change has been made to the documentation and your objective in the future
     will be to modify all relevant pieces of the documentation. But first it is necessary to identify all
     relevant pieces of documentation, and for that, the Retrieval Augmented Generation approach will
-    be used. Your task now, is to rewrite a user query so that there would be a higher chance of
+    be used. Your have two tasks:
+
+    1) Rewrite a user query so that there would be a higher chance of
     retrieving all relevant pieces of documentation (based on how retrieval step in RAG works).
 
     Guidelines:
     
-    1. Do not use any imperative commands.
-    2. Use passive voice when describing changes to the product that were brought about.
-    3. Only include changes that were made to the product in your answer.
-    4. Just output the rewritten query, don't add anything else to your answer.
+        1. Do not use any imperative commands.
+        2. Use passive voice when describing changes to the product that were brought about.
+        3. Only include changes that were made to the product in your answer.
+    
+    2) Extract two pieces of information from the user query:
+        1. The feature of the product that was changed
+        2. How this feature was changed
+    
+    Combine answers from the tasks 1) and 2) into a single string in a JSON format with a following structure:
+    {
+        "rewritten_query": <the query you have written in the first task>
+        "changed_feature": <the feature that was changed (second task)>
+        "changes": <how the feature was changed (second task)>
+    }
+
+    Only return the string in a JSON format specified above, nothing else.
         
 """
 
@@ -79,6 +93,6 @@ prompt_checked_documents = """
 
     In other words, you need to return a list of documents in a JSON format, where each document has a simple JSON response
     structure outlined above. If there are no documents that you think should be changed, return empty list.
-    
+
     4. Only return the JSON list in the format specified above, don't add anything else.
 """

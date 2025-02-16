@@ -1,20 +1,23 @@
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
-from vectorstore import VectorStore
+from src.vectorstore import VectorStore
 import faiss
 from sentence_transformers.cross_encoder import CrossEncoder
 import bisect
 import torch.nn as nn
-from typing import List, Tuple, Literal
+from typing import List, Tuple, Literal, Optional
 import tiktoken
-from binary_search import find_partitions
+from src.binary_search import find_partitions
 import json
-from prompts import rewrite_query_prompt, prompt_updated_documents, prompt_checked_documents
+from src.prompts import rewrite_query_prompt, prompt_updated_documents, prompt_checked_documents
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 import asyncio
 import tqdm
-from tools import UpdateKnowledgeTool, DisplayDiffTool
+from src.tools import UpdateKnowledgeTool, DisplayDiffTool
+from elasticsearch import Elasticsearch
+from src.elasticsearch import ElasticSearchManager
+from collections import defaultdict
 
 
 ENV_PATH = os.path.join(os.path.join(__file__, '..'), '.env')
@@ -27,12 +30,16 @@ class Agent:
             llm_model_name: str,
             embedding_model_name: str,
             reranker_model_name: str,
-            *args,
+            use_elastic_search: bool,
+            update_api_calls: int = 8,
             max_api_calls: int = 50,
+            weight_elastic: Optional[float] = None,
+            *args,
             **kwargs,
         ):
         self.llm = llm_model_name
         self.max_api_calls = max_api_calls
+        self.update_api_calls = update_api_calls
         self.client = OpenAI()
         self.reranker = CrossEncoder(reranker_model_name, default_activation_function=nn.Sigmoid())
         self.vs = VectorStore(
@@ -41,6 +48,15 @@ class Agent:
             *args,
             **kwargs
         )
+        if use_elastic_search:
+            if weight_elastic is None:
+                raise ValueError("You must specify weight value for elastic search scores if you want to use elastic search. \
+                                  This value should be between 0 and 1.")
+            
+            self.weight_elastic = weight_elastic
+            self.elastic_index_name = "documents"
+            self.elasticsearch = ElasticSearchManager(elastic_instance=Elasticsearch(os.environ.get('ELASTICSEARCH_URL')), index=self.elastic_index_name)
+            self.elasticsearch.add_to_index(documents=self.vs.json_documents)
 
     def _calculate_number_of_tokens(self, text: str):
         encoding = tiktoken.encoding_for_model(self.llm)
@@ -48,7 +64,7 @@ class Agent:
         return len(tokens)
                     
 
-    def rewrite_user_query(self, query: str) -> str:
+    def rewrite_and_analyze_user_query(self, query: str) -> Tuple[str, str, str]:
         completion = self.client.chat.completions.create(
             model=self.llm,
             messages=[
@@ -58,10 +74,13 @@ class Agent:
         )
         self.max_api_calls -= 1
 
-        return completion.choices[0].message.content
+        response = json.loads(completion.choices[0].message.content)
+        rewritten_query, feature_changed, changes = response["rewritten_query"], response["changed_feature"], response["changes"]
+        return rewritten_query, feature_changed, changes
     
     async def extract_relevant_documents(self,
                                          query: str,
+                                         feature_changed: str,
                                          cosine_min: float = 0.1,
                                          score_min: float = 0.1,
                                          score_confident: float = 0.5,
@@ -69,23 +88,20 @@ class Agent:
                                          ) -> Tuple[List[dict], List[dict]]:
         # embed query vector
         response = self.client.embeddings.create(input=[query], model=self.vs.embedding_model)
+        self.max_api_calls -= 1
         query_embedding = response.data[0].embedding
-        normalized_query_embedding = VectorStore.normalize_embedding(query_embedding)
+        faiss.normalize_L2(query_embedding)
         # populate vector store
         await self.vs.populate_vector_store()
         # retrieve all documents within radius
-        l2_threshold = 2 * (1 - cosine_min)
-        res = faiss.RangeSearchResult(nq=1)
-        self.vs.index.range_search(normalized_query_embedding, l2_threshold, res)
+        threshold = cosine_min
+        lims, distances, indices = self.vs.index.range_search(query_embedding, threshold)
 
         retrieved_ids = set()
-        for i in range(res.lims[0], res.lims[1]):
-            vector_id = res.labels[i]
-            sq_l2_distance = res.distances[i]
-            # convert squared L2 distance back to cosine similarity
-            cosine_similarity = 1 - (sq_l2_distance / 2)
+        for i in range(lims[0], lims[1]):
+            vector_id = indices[i]
             # double-check the threshold here
-            if cosine_min <= cosine_similarity <= 1.0:
+            if cosine_min <= distances[i] <= 1.0:
                 retrieved_ids.add(vector_id)
         
         # Reranking retrieved documents with a cross encoder
@@ -98,16 +114,30 @@ class Agent:
             reranker_results.extend(list(zip(indices, reranker_scores)))
 
         reranker_results.sort(key=lambda x: x[1])
-        scores = [x[1] for x in reranker_results]
-        # find the documents with cross encoder scores between 0.1 and 0.5
+
+        if hasattr(self, "elasticsearch"):
+            elastic_scores = self.elasticsearch.query_index(query=feature_changed)
+            fused_scores = defaultdict(float, lambda: 0.)
+            reranker_scores = {_id: score for _id, score in reranker_results}
+            for _id in list(elastic_scores.keys() | reranker_scores.keys()):
+                fused_scores[_id] = elastic_scores.get(_id, 0.) * self.weight_elastic + reranker_scores.get(_id, 0.) * (1 - self.weight_elastic)
+
+            scores = list(fused_scores.values()).sort()
+            results = list(fused_scores.items()).sort(key=lambda x: x[1])
+
+        else:
+            scores = [x[1] for x in reranker_results]
+            results = reranker_results
+        # find the documents with cross encoder/fused scores between 0.1 and 0.5
         # those are sent to be checked with llm
         # the documents with scores above 0.5 are sent to be updated right away
         cutoff_index = bisect.bisect_left(scores, score_min)
         index_confident = bisect.bisect_left(scores, score_confident)
-        check_documents_ids = {x[0] for x in reranker_results[cutoff_index:index_confident]}
-        update_documents_ids = {x[0] for x in reranker_results[index_confident:]}
+        check_documents_ids = {x[0] for x in results[cutoff_index:index_confident]}
+        update_documents_ids = {x[0] for x in results[index_confident:]}
         documents_to_be_checked = [x for i, x in enumerate(self.vs.json_documents) if i in check_documents_ids]
         documents_to_be_updated = [x for i, x in enumerate(self.vs.json_documents) if i in update_documents_ids]
+        print(f"Extracted {len(documents_to_be_checked)} documents to be checked, and {len(documents_to_be_updated)} to be updated.")
         return documents_to_be_checked, documents_to_be_updated
     
 
@@ -189,7 +219,7 @@ class Agent:
         )
         # Find partitions for both groups
         partition_checked_group, partition_updated_group = find_partitions(
-            max_partitions=self.max_api_calls,
+            max_partitions=self.max_api_calls - self.update_api_calls,
             tokens_updated_group=tokens_updated_group,
             tokens_checked_group=tokens_checked_group,
             prompt_updated_token_count=prompt_updated_token_count,
@@ -213,8 +243,20 @@ class Agent:
         updated_documents_response = await self._process_messages(messages_updated_group, task='update')
         checked_documents_response = await self._process_messages(messages_checked_group, task='check')
         # Update knowledge
-        await UpdateKnowledgeTool.run(updated_documents_response, self.vs, group='update')
-        await UpdateKnowledgeTool.run(checked_documents_response, self.vs, group='check')
+        kwargs_update = {
+            "model_response": updated_documents_response,
+            "vs": self.vs,
+            "group": 'update',
+        }
+
+        if hasattr(self, "elasticsearch"):
+            kwargs_update["elasticsearch_manager"] = self.elasticsearch
+
+        await UpdateKnowledgeTool.run(**kwargs_update)
+        kwargs_check = kwargs_update.copy()
+        kwargs_check["model_response"] = checked_documents_response
+        kwargs_check["group"] = 'check'
+        await UpdateKnowledgeTool.run(**kwargs_check)
         # Display diff for changed documents
         print(f"QUERY: {query} \n\n")
         DisplayDiffTool.run(updated_documents_response, group='update')
@@ -222,8 +264,12 @@ class Agent:
 
     # Method that runs the whole pipeline
     async def run(self, query):
-        rewritten_user_query = self.rewrite_user_query(query)
-        documents_to_be_checked, documents_to_be_updated = await self.extract_relevant_documents(query=rewritten_user_query)
+        rewritten_user_query, feature_changed, changes = self.rewrite_and_analyze_user_query(query)
+        print(f"Initial user query: \n{query}\n")
+        print(f"Feature changed: \n{feature_changed}\n")
+        print(f"Identified changes: \n{changes}\n")
+        print(f"Rewritten query: \n{rewritten_user_query}\n")
+        documents_to_be_checked, documents_to_be_updated = await self.extract_relevant_documents(query=rewritten_user_query, feature_changed=feature_changed)
         await self.update_documents(
             documents_to_be_checked=documents_to_be_checked,
             documents_to_be_updated=documents_to_be_updated,

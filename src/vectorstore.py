@@ -1,5 +1,5 @@
 import faiss
-from faiss import IndexIDMap2, IndexFlatL2
+from faiss import IndexIDMap2, IndexFlatIP
 from openai import OpenAI
 from typing import List
 from dotenv import load_dotenv
@@ -19,33 +19,32 @@ class VectorStore:
     def __init__(self,
                  dim: int,
                  embedding_model_name: str,
-                 knowledge_file_path: str = "../dune_docs.json",
+                 knowledge_file_path: str = "dune_docs.jsonl",
                  index_file_name: str = "documentation.index"
                  ):
         
-        self.index = IndexIDMap2(IndexFlatL2(dim))
+        self.index = IndexIDMap2(IndexFlatIP(dim))
         self.index_path = os.path.abspath(os.path.join(
             os.path.dirname(__file__),
             '..',
             index_file_name
         ))
-        self.knowledge_file_path = knowledge_file_path
+        self.knowledge_file_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__),
+            '..',
+            knowledge_file_path
+        ))
         self.client = OpenAI()
         self.embedding_model = embedding_model_name
         self.load_data()
-
-    @staticmethod
-    def normalize_embedding(embedding: List[float]) -> List[float]:
-        norm = np.linalg.norm(embedding)
-        unit_embedding = np.array(embedding) / norm
-        return unit_embedding.tolist()
     
     # Synchronous function with retry logic to get an embedding.
     @retry(wait=wait_random_exponential(min=1, max=20), stop=stop_after_attempt(6))
     def _get_embedding(self, text: str, model="text-embedding-3-small") -> List[float]:
         response = self.client.embeddings.create(input=[text], model=model)
-        embedding = response.data[0].embedding
-        return VectorStore.normalize_embedding(embedding)
+        embedding = np.array(response.data[0].embedding)
+        faiss.normalize_L2(embedding)
+        return embedding
     
     # Asynchronous wrapper that runs the synchronous function in a thread.
     async def _get_embedding_async(self,
@@ -100,5 +99,5 @@ class VectorStore:
                 documents.append(doc["content"])
 
             embeddings = await self.extract_embeddings(documents)
-            self.index.add_with_ids(embeddings, ids)
+            self.index.add_with_ids(np.array(embeddings), ids)
             faiss.write_index(self.index, self.index_path)
