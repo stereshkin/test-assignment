@@ -1,7 +1,7 @@
 import faiss
 from faiss import IndexIDMap2, IndexFlatIP
 from openai import OpenAI
-from typing import List
+from typing import List, Optional
 from dotenv import load_dotenv
 import os
 import json
@@ -45,7 +45,7 @@ class VectorStore:
         return len(tokens)
 
 
-    def _batch_documents(self, documents: List[str], token_limit: int = 7000):
+    def _batch_documents(self, documents: List[str], token_limit: int = 7000, allowed_api_calls: Optional[int] = None):
         """
         Partition documents into batches such that each batch's total token count is below token_limit.
         """
@@ -68,6 +68,14 @@ class VectorStore:
 
         if current_batch:
             batches.append(current_batch)
+        
+        if allowed_api_calls is not None and len(batches) > allowed_api_calls:
+            raise RuntimeError(
+                f"Too many batches required: {len(batches)} batches generated, "
+                f"but only {allowed_api_calls} API calls are allowed. You can try
+                increasing current token_limit ({token_limit} tokens) to a larger number of tokens
+                to decrease the number of batches."
+            )
         return batches
 
     
@@ -97,12 +105,16 @@ class VectorStore:
         return result
     
     # Main asynchronous function to process the list of documents.
-    async def extract_embeddings(self, documents: List[str], max_concurrent: int = 5, token_limit: int = 7000) -> list:
+    async def extract_embeddings(self,
+                                documents: List[str],
+                                max_concurrent: int = 5,
+                                token_limit: int = 7000,
+                                allowed_api_calls: Optional[int] = None) -> list:
         """
         Extract embeddings for all documents in batches that adhere to the token limit.
         Batches are processed asynchronously with a concurrency limit.
         """
-        batches = self._batch_documents(documents, token_limit=token_limit)
+        batches = self._batch_documents(documents, token_limit=token_limit, allowed_api_calls=allowed_api_calls)
         semaphore = asyncio.Semaphore(max_concurrent)
         all_embeddings = []
         

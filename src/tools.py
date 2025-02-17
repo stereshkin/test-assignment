@@ -8,8 +8,11 @@ from src.elasticsearch import ElasticSearchManager
 
 
 class UpdateKnowledgeTool:
-    @staticmethod
+    def __init__(self, allowed_api_calls: int):
+        self.allowed_api_calls = allowed_api_calls
+    
     async def run(
+        self,    
         modified_knowledge: List[dict],
         vs: VectorStore,
         elasticsearch_manager: Optional[ElasticSearchManager] = None
@@ -24,7 +27,7 @@ class UpdateKnowledgeTool:
             vs.json_documents[int(doc["_id"])] = doc["content_after"]
         assert os.path.exists(vs.index_path)
         vs.index.remove_ids(np.array(ids))
-        new_embeddings = await vs.extract_embeddings(documents=new_documents)
+        new_embeddings = await vs.extract_embeddings(documents=new_documents, allowed_api_calls=self.allowed_api_calls)
         vs.index.add_with_ids(np.array(new_embeddings), ids)
         faiss.write_index(vs.index, vs.index_path)
         # Update elasticsearch index if elasticsearch was used

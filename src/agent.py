@@ -268,7 +268,7 @@ class Agent:
         if hasattr(self, "elasticsearch"):
             kwargs_update["elasticsearch_manager"] = self.elasticsearch
 
-        await UpdateKnowledgeTool.run(**kwargs_update)
+        await UpdateKnowledgeTool(allowed_api_calls=self.update_api_calls).run(**kwargs_update)
         # Display diff for changed documents
         print(f"QUERY: {query} \n\n")
         DisplayDiffTool.run(updated_documents_response, group='update')
