@@ -58,7 +58,7 @@ class Agent:
             self.elasticsearch = ElasticSearchManager(elastic_instance=Elasticsearch(os.environ.get('ELASTICSEARCH_URL')), index=self.elastic_index_name)
             self.elasticsearch.add_to_index(documents=self.vs.json_documents)
 
-    def _calculate_number_of_tokens(self, text: str):
+    def _calculate_number_of_tokens(self, text: str) -> int:
         encoding = tiktoken.encoding_for_model(self.llm)
         tokens = encoding.encode(text)
         return len(tokens)
@@ -82,7 +82,7 @@ class Agent:
                                          query: str,
                                          feature_changed: str,
                                          cosine_min: float = 0.1,
-                                         score_min: float = 0.1,
+                                         score_min: float = 0.2,
                                          score_confident: float = 0.5,
                                          batch_size=100
                                          ) -> Tuple[List[dict], List[dict]]:
@@ -141,11 +141,16 @@ class Agent:
         return documents_to_be_checked, documents_to_be_updated
     
 
-    def _prepare_token_num_list(self, system_prompt: str, documents: List[dict]) -> List[int]:
+    def _prepare_token_num_list(self,
+                                system_prompt: str,
+                                query: str,
+                                supplementary_information: dict,
+                                documents: List[dict]) -> List[int]:
         """
         Helper method to form a list with number of tokens for each additional document in the prompt.
         """
-        prompt_num_tokens = self._calculate_number_of_tokens(system_prompt)
+        user_prompt = query + f'\n\nHere is a supplementary information:\n {json.dumps(supplementary_information)}\n\nHere are the documents: \n'
+        prompt_num_tokens = self._calculate_number_of_tokens(system_prompt) + self._calculate_number_of_tokens(user_prompt)
         documents.sort(key=lambda x: self._calculate_number_of_tokens(json.dumps(x)))
         tokens_num_list = [self._calculate_number_of_tokens(json.dumps(documents[0])) + prompt_num_tokens]
         tokens_num_list.extend(
@@ -185,6 +190,7 @@ class Agent:
 
     @staticmethod
     def _create_messages_from_partitions(system_prompt: str,
+                                        supplementary_information: dict, 
                                         partition: List[Tuple[int, int]],
                                         documents: List[dict],
                                         query: str
@@ -192,7 +198,7 @@ class Agent:
         all_messages = []
         for start, end in partition:
             documents_selected = list(map(json.dumps, documents[start:end]))
-            query += '\n\nHere are the documents: \n\n' + '\n\n'.join(documents_selected)
+            query += f'\n\nHere is a supplementary information:\n {json.dumps(supplementary_information)}\n\nHere are the documents: \n' + '\n\n'.join(documents_selected)
             messages_partition = [
                 {"role": "developer", "content": system_prompt},
                 {"role": "user", "content": query}
@@ -205,16 +211,21 @@ class Agent:
     async def update_documents(self,
                                documents_to_be_checked: List[dict],
                                documents_to_be_updated: List[dict],
-                               query: str
+                               query: str,
+                               supplementary_information: dict
                                ) -> None:
         # Create lists with with token counts for both groups
         tokens_updated_group, prompt_updated_token_count = self._prepare_token_num_list(
             system_prompt=prompt_updated_documents,
+            query=query,
+            supplementary_information=supplementary_information,
             documents=documents_to_be_updated
         )
 
         tokens_checked_group, prompt_checked_token_count = self._prepare_token_num_list(
             system_prompt=prompt_checked_documents,
+            query=query,
+            supplementary_information=supplementary_information,
             documents=documents_to_be_checked
         )
         # Find partitions for both groups
@@ -228,6 +239,7 @@ class Agent:
         # Create list of messages for both groups
         messages_updated_group = Agent._create_messages_from_partitions(
             system_prompt=prompt_updated_documents,
+            supplementary_information=supplementary_information,
             partition=partition_updated_group,
             documents=documents_to_be_updated,
             query=query
@@ -235,6 +247,7 @@ class Agent:
 
         messages_checked_group = Agent._create_messages_from_partitions(
             system_prompt=prompt_checked_documents,
+            supplementary_information=supplementary_information,
             partition=partition_checked_group,
             documents=documents_to_be_checked,
             query=query
@@ -242,21 +255,20 @@ class Agent:
         # Get reponses for all the messages for both groups
         updated_documents_response = await self._process_messages(messages_updated_group, task='update')
         checked_documents_response = await self._process_messages(messages_checked_group, task='check')
+        # Load the data
+        updated_documents_data = json.loads(updated_documents_response)
+        checked_documents_data = json.loads(checked_documents_response)
         # Update knowledge
+        modified_knowledge = [*updated_documents_data, *checked_documents_data]
         kwargs_update = {
-            "model_response": updated_documents_response,
-            "vs": self.vs,
-            "group": 'update',
+            "modified_knowledge": modified_knowledge,
+            "vs": self.vs
         }
 
         if hasattr(self, "elasticsearch"):
             kwargs_update["elasticsearch_manager"] = self.elasticsearch
 
         await UpdateKnowledgeTool.run(**kwargs_update)
-        kwargs_check = kwargs_update.copy()
-        kwargs_check["model_response"] = checked_documents_response
-        kwargs_check["group"] = 'check'
-        await UpdateKnowledgeTool.run(**kwargs_check)
         # Display diff for changed documents
         print(f"QUERY: {query} \n\n")
         DisplayDiffTool.run(updated_documents_response, group='update')
@@ -265,6 +277,10 @@ class Agent:
     # Method that runs the whole pipeline
     async def run(self, query):
         rewritten_user_query, feature_changed, changes = self.rewrite_and_analyze_user_query(query)
+        supplementary_information = {
+            "changed_feature": feature_changed,
+            "changes": changes
+        }
         print(f"Initial user query: \n{query}\n")
         print(f"Feature changed: \n{feature_changed}\n")
         print(f"Identified changes: \n{changes}\n")
@@ -273,5 +289,6 @@ class Agent:
         await self.update_documents(
             documents_to_be_checked=documents_to_be_checked,
             documents_to_be_updated=documents_to_be_updated,
-            query=rewritten_user_query
+            query=rewritten_user_query,
+            supplementary_information=supplementary_information
             )

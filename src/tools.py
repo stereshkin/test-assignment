@@ -3,20 +3,18 @@ import os
 from src.vectorstore import VectorStore
 import numpy as np
 import faiss
-from typing import Literal, Optional
+from typing import Literal, Optional, List
 from src.elasticsearch import ElasticSearchManager
 
 
 class UpdateKnowledgeTool:
     @staticmethod
     async def run(
-        model_response: str,
+        modified_knowledge: List[dict],
         vs: VectorStore,
-        group: Literal['check', 'update'],
         elasticsearch_manager: Optional[ElasticSearchManager] = None
         ) -> None:
 
-        modified_knowledge = json.loads(model_response)
         # Update vector store
         new_documents = []
         ids = []
@@ -50,7 +48,7 @@ class UpdateKnowledgeTool:
 
             elasticsearch_manager.remove_from_index(documents=documents_to_be_removed)
             elasticsearch_manager.add_to_index(documents=documents_to_be_inserted)
-        print(f"The vector store has been updated successfully from the {group} group!")
+        print(f"The vector store has been updated successfully!")
 
 
 class DisplayDiffTool:
