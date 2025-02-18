@@ -12,7 +12,8 @@ import tqdm
 import numpy as np
 import tiktoken
 
-ENV_PATH = os.path.join(os.path.join(__file__, '..'), '.env')
+basedir = os.path.abspath(os.path.dirname(__file__))
+ENV_PATH = os.path.join(os.path.join(basedir, '..'), '.env')
 load_dotenv(ENV_PATH)
 
 class VectorStore:
@@ -70,12 +71,10 @@ class VectorStore:
             batches.append(current_batch)
         
         if allowed_api_calls is not None and len(batches) > allowed_api_calls:
-            raise RuntimeError(
-                f"Too many batches required: {len(batches)} batches generated, "
-                f"but only {allowed_api_calls} API calls are allowed. You can try
-                increasing current token_limit ({token_limit} tokens) to a larger number of tokens
-                to decrease the number of batches."
-            )
+            raise RuntimeError(f"Too many batches required: {len(batches)} batches generated,"
+                             f"but only {allowed_api_calls} API calls are allowed. You can try"
+                            "increasing current token_limit ({token_limit} tokens) to a larger number"
+                             "of tokens to decrease the number of batches.")
         return batches
 
     
@@ -83,9 +82,8 @@ class VectorStore:
     @retry(wait=wait_random_exponential(min=1, max=20), stop=stop_after_attempt(6))
     def _get_embeddings_batch(self, texts: List[str], model: str) -> List[List[float]]:
         response = self.client.embeddings.create(input=texts, model=model)
-        embeddings = [np.array(item.embedding) for item in response.data]
-        for emb in embeddings:
-            faiss.normalize_L2(emb)
+        embeddings = np.array([item.embedding for item in response.data]).astype(np.float32)
+        faiss.normalize_L2(embeddings)
 
         return embeddings
     
@@ -137,7 +135,7 @@ class VectorStore:
                 document = json.loads(line)
                 self.json_documents.append(
                     {
-                        "_id": ind,
+                        "ind": ind,
                         "content": re.sub(r'[^\x00-\x7F]+', ' ', document.get("content")),  
                         "url": document.get("url")
                     }
@@ -151,7 +149,7 @@ class VectorStore:
             ids = []
             documents = []
             for doc in self.json_documents:
-                ids.append(doc["_id"])
+                ids.append(doc["ind"])
                 documents.append(doc["content"])
 
             embeddings = await self.extract_embeddings(documents)

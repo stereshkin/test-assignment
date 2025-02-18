@@ -1,4 +1,4 @@
-from typing import List, Literal, Tuple
+from typing import List, Literal, Tuple, Optional
 
 def num_partitions(token_counts: List[int], threshold: int, prompt_token_count: int):
         """
@@ -56,51 +56,81 @@ def partition_documents(token_counts: List[int], threshold: int, prompt_token_co
 
 def find_partitions(
     max_partitions: int,
-    tokens_updated_group: List[int],
-    tokens_checked_group: List[int],
-    prompt_updated_token_count: int,
-    prompt_checked_token_count: int,
+    tokens_updated_group: Optional[List[int]],
+    tokens_checked_group: Optional[List[int]],
+    prompt_updated_token_count: Optional[int],
+    prompt_checked_token_count: Optional[int],
     find_best_thresholds: Literal["minsum", "minmax", "minvariance"] = "minmax",
     max_token_count_per_call: int = 50000,
-    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+    ) -> Tuple[Optional[List[Tuple[int, int]]], Optional[List[Tuple[int, int]]]]:
     """
     The function finds partitions for both checked and updated document groups.
     """
+    if tokens_updated_group is not None and tokens_checked_group is not None:
+        group_thresholds = []
+        for partitions_count in range(1, max_partitions):
+            token_threshold_updated_group = min_threshold_for_group(tokens_updated_group,
+                                                                    partitions_count,
+                                                                    prompt_token_count=prompt_updated_token_count)
+            token_threshold_checked_group = min_threshold_for_group(tokens_checked_group,
+                                                                    max_partitions - partitions_count,
+                                                                    prompt_token_count=prompt_checked_token_count)
 
-    group_thresholds = []
-    for partitions_count in range(1, max_partitions):
-        token_threshold_updated_group = min_threshold_for_group(tokens_updated_group, partitions_count)
-        token_threshold_checked_group = min_threshold_for_group(tokens_checked_group, max_partitions - partitions_count)
+            group_thresholds.append((
+                token_threshold_updated_group,
+                token_threshold_checked_group
+            ))
+        
+        filtered_thresholds = list(filter(
+            lambda x: x[0] < max_token_count_per_call and x[1] < max_token_count_per_call,
+            group_thresholds
+            ))
+        
+        if find_best_thresholds == "minsum":
+            optimal_thresholds = min(filtered_thresholds, lambda x: x[0] + x[1])
+        elif find_best_thresholds == "minmax":
+            optimal_thresholds = min(filtered_thresholds, key=lambda x: max(x[0], x[1]))
+        elif find_best_thresholds == "minvariance":
+            optimal_thresholds = min(filtered_thresholds, key=lambda x: (x[0] - x[1]) ** 2)
+        else:
+            raise ValueError("Unknown thresholds aggregation method.")
 
-        group_thresholds.append((
-             token_threshold_updated_group,
-             token_threshold_checked_group
-        ))
+        threshold_updated_group, threshold_checked_group = optimal_thresholds
+        partition_updated_group = partition_documents(
+            tokens_updated_group,
+            threshold_updated_group,
+            prompt_updated_token_count
+        )
+        partition_checked_group = partition_documents(
+            tokens_checked_group,
+            threshold_checked_group,
+            prompt_checked_token_count
+        )
+
     
-    filtered_thresholds = list(filter(
-         lambda x: x[0] < max_token_count_per_call and x[1] < max_token_count_per_call,
-         group_thresholds
-         ))
+    elif tokens_checked_group is None:
+        threshold_updated_group = min_threshold_for_group(tokens_updated_group,
+                                                        max_partitions,
+                                                        prompt_token_count=prompt_updated_token_count)
+        partition_updated_group = partition_documents(
+            tokens_updated_group,
+            threshold_updated_group,
+            prompt_updated_token_count
+        )
+
+        partition_checked_group = None
     
-    if find_best_thresholds == "minsum":
-        optimal_thresholds = min(filtered_thresholds, lambda x: x[0] + x[1])
-    elif find_best_thresholds == "minmax":
-        optimal_thresholds = min(filtered_thresholds, key=lambda x: max(x[0], x[1]))
-    elif find_best_thresholds == "minvariance":
-        optimal_thresholds = min(filtered_thresholds, key=lambda x: (x[0] - x[1]) ** 2)
-    else:
-        raise ValueError("Unknown thresholds aggregation method.")
+    elif tokens_updated_group is None:
+        threshold_checked_group = min_threshold_for_group(tokens_checked_group,
+                                                        max_partitions,
+                                                        prompt_token_count=prompt_checked_token_count)
+        partition_checked_group = partition_documents(
+            tokens_checked_group,
+            threshold_checked_group,
+            prompt_checked_token_count
+        )
 
-    threshold_updated_group, threshold_checked_group = optimal_thresholds
-    partition_updated_group = partition_documents(
-        tokens_updated_group,
-        threshold_updated_group,
-        prompt_updated_token_count
-    )
-    partition_checked_group = partition_documents(
-        tokens_checked_group,
-        threshold_checked_group,
-        prompt_checked_token_count
-    )
-
+        partition_updated_group = None
+    
     return partition_checked_group, partition_updated_group
+
