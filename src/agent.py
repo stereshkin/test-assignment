@@ -14,24 +14,26 @@ import json
 from src.prompts import rewrite_query_prompt, prompt_updated_documents, prompt_checked_documents
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 import asyncio
-import tqdm
 from src.tools import UpdateKnowledgeTool, DisplayDiffTool
 from elasticsearch import Elasticsearch
 from src.elasticsearch import ElasticSearchManager
 from collections import defaultdict
 from src.models import DocumentationChangeResponse, UpdatedDocumentsResponse
+from rich.layout import Layout
 from rich.console import Console
 from rich.panel import Panel
 from rich.tree import Tree
 from rich.live import Live
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 from collections.abc import Callable
+from src.base import BaseDisplayClass
 
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 ENV_PATH = os.path.join(os.path.join(basedir, '..'), '.env')
 load_dotenv(ENV_PATH)
 
-class Agent:
+class Agent(BaseDisplayClass):
     def __init__(
             self,
             dim: int,
@@ -39,6 +41,9 @@ class Agent:
             embedding_model_name: str,
             use_cross_encoder_reranking: bool,
             use_elastic_search: bool,
+            cosine_sim_min: float = 0.1,
+            score_min: float = 0.2,
+            score_confident: float = 0.7,
             update_api_calls: int = 8,
             max_api_calls: int = 50,
             weight_elastic: Optional[float] = None,
@@ -46,22 +51,32 @@ class Agent:
             *args,
             **kwargs,
         ):
+
+        console = Console()
+        layout = Layout()
+        super().__init__(console, layout)
         self.llm = llm_model_name
         self.max_api_calls = max_api_calls
         self.update_api_calls = update_api_calls
         self.rewrite_query_model = DocumentationChangeResponse
         self.updated_documents_model = UpdatedDocumentsResponse
         self.use_cross_encoder_reranking = use_cross_encoder_reranking
+        self.cosine_sim_min = cosine_sim_min
+        self.score_min = score_min
+        self.score_confident = score_confident
         self.use_elastic_search = use_elastic_search
         self.client = OpenAI()
         self.vs = VectorStore(
             dim,
             embedding_model_name,
+            self.console,
+            self.layout,
             *args,
             **kwargs
         )
         self.documents_changes = {}
         self.final_output_tree = None
+        self.log_callback = None
         if self.use_cross_encoder_reranking:
             if reranker_model_name is None:
                 raise RuntimeError("You must specify cross encoder model name if you want to use cross encoder reranking.")
@@ -73,7 +88,6 @@ class Agent:
                                   This value should be between 0 and 1.")
             
             self.weight_elastic = weight_elastic
-            self.log_callback = None
             self.elastic_index_name = "documents"
             self.elasticsearch = ElasticSearchManager(elastic_instance=Elasticsearch(os.environ.get('ELASTICSEARCH_URL')), index=self.elastic_index_name)
             self.elasticsearch.add_to_index(documents=self.vs.json_documents)
@@ -89,8 +103,7 @@ class Agent:
             raise RuntimeError("Callback function is not set.")
         
     def print_tree(self):
-        console = Console()
-        console.print(self.final_output_tree)
+        self.console.print(self.final_output_tree)
 
 
     def _calculate_number_of_tokens(self, text: str) -> int:
@@ -118,9 +131,9 @@ class Agent:
     async def extract_relevant_documents(self,
                                          query: str,
                                          feature_changed: str,
-                                         cosine_min: float = 0.1,
-                                         score_min: float = 0.2,
-                                         score_confident: float = 0.7,
+                                         cosine_min: float,
+                                         score_min: float,
+                                         score_confident: float,
                                          batch_size=100
                                          ) -> Tuple[List[dict], List[dict]]:
         # embed query vector
@@ -130,6 +143,7 @@ class Agent:
         faiss.normalize_L2(query_embedding)
         # populate vector store
         await self.vs.populate_vector_store()
+        self.log(Panel("The vector store is populated.", style="green"))
         # retrieve all documents within radius
         threshold = cosine_min
         lims, distances, indices = self.vs.index.range_search(query_embedding, threshold)
@@ -148,6 +162,9 @@ class Agent:
                 retrieved_ids.add(vector_id)
                 retrieved_docs_and_scores.append((vector_id, distance))
 
+        self.log(Panel(f"[bold]Retrieval hyperparameters:[/bold]\nCutoff cosine similarity score: [bold]{self.cosine_sim_min}[/bold]\n"
+                       f"Cutoff reranker score: [bold]{self.score_min}[/bold]\n"
+                       f"Reranker confidence score: [bold]{self.score_confident}[/bold].", style="blue"))
         log_message = (f"Extracted [bold]{len(retrieved_ids)}[/bold] documents in total"
                        f" with range search. Scores are ranging"
                        f" from [bold]{round(min_cossim_score, 2)}[/bold] to [bold]{round(max_cossim_score, 2)}[/bold].")
@@ -237,18 +254,32 @@ class Agent:
             return await loop.run_in_executor(None, self._call_llm, messages)
         
 
-    async def _call_llm_async_wrapper(self, messages: List[dict], semaphore: asyncio.Semaphore, pbar) -> str:
+    async def _call_llm_async_wrapper(self, messages: List[dict], semaphore: asyncio.Semaphore, progress: Progress, task_id) -> str:
         response = await self._call_llm_async(messages=messages, semaphore=semaphore)
-        pbar.update(1)
+        progress.advance(task_id)
         return response
     
     async def _process_messages(self, messages_list: List[List[dict]], task: Literal["update", "check"], max_concurrent: int = 5) -> List[str]:
         semaphore = asyncio.Semaphore(max_concurrent)
-        with tqdm.tqdm(total=len(messages_list), desc=f"Processing messages, task: {task}") as pbar:
-            tasks = [
-                self._call_llm_async_wrapper(messages, semaphore, pbar) for messages in messages_list
-            ]
-            responses = await asyncio.gather(*tasks)
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            transient=True,
+            console=self.console
+        )
+
+        self.layout["progress_section"].update(progress)
+        self.layout["progress_section"].visible = True
+        task_id = progress.add_task(f"Processing messages, task: {task}", total=len(messages_list))
+        tasks = [
+            self._call_llm_async_wrapper(messages, semaphore, progress, task_id)
+            for messages in messages_list
+        ]
+        responses = await asyncio.gather(*tasks)
+
         return responses
 
 
@@ -261,10 +292,10 @@ class Agent:
         all_messages = []
         for start, end in partition:
             documents_selected = list(map(json.dumps, documents[start:end]))
-            query += f'\n\nHere are the documents: \n' + '\n\n'.join(documents_selected)
+            partition_query = query + f'\n\nHere are the documents: \n' + '\n\n'.join(documents_selected)
             messages_partition = [
                 {"role": "developer", "content": system_prompt},
-                {"role": "user", "content": query}
+                {"role": "user", "content": partition_query}
             ]
             all_messages.append(messages_partition)
 
@@ -303,8 +334,10 @@ class Agent:
             prompt_updated_token_count=prompt_updated_token_count,
             prompt_checked_token_count=prompt_checked_token_count
         )
+        api_calls_used = 0
         # Create list of messages for both groups
         if partition_updated_group is not None:
+            api_calls_used += len(partition_updated_group)
             messages_updated_group = Agent._create_messages_from_partitions(
                 system_prompt=prompt_updated_documents,
                 partition=partition_updated_group,
@@ -320,6 +353,7 @@ class Agent:
             updated_documents_flattened = []
 
         if partition_checked_group is not None:
+            api_calls_used += len(partition_checked_group)
             messages_checked_group = Agent._create_messages_from_partitions(
                 system_prompt=prompt_checked_documents,
                 partition=partition_checked_group,
@@ -339,7 +373,8 @@ class Agent:
         if len(modified_knowledge) == 0:
             self.log(Panel("[bold red]No documents were changed by LLM.[/bold red]", style="red"))
             return
-
+        
+        self.modified_knowledge = modified_knowledge
         kwargs_update = {
             "modified_knowledge": modified_knowledge,
             "vs": self.vs
@@ -348,7 +383,8 @@ class Agent:
         if self.use_elastic_search:
             kwargs_update["elasticsearch_manager"] = self.elasticsearch
 
-        await UpdateKnowledgeTool(allowed_api_calls=self.update_api_calls).run(**kwargs_update)
+        left_api_calls = self.max_api_calls - api_calls_used
+        await UpdateKnowledgeTool(allowed_api_calls=left_api_calls).run(**kwargs_update)
         self.log(Panel("[bold green]The documentation was updated![/bold green]", style="green"))
         
         # Save changed documents
@@ -363,23 +399,31 @@ class Agent:
         if group not in ['check', 'update']:
             raise ValueError("You must specify either 'check' or 'update' group.")
 
-        console = Console()
         if group in self.documents_changes:
             DisplayDiffTool.run(self.documents_changes[group], group=group)
         else:
-            console.print(Panel(f"[bold red]No documents from the group {group} have been changed.[/bold red]",
+            self.console.print(Panel(f"[bold red]No documents from the group {group} have been changed.[/bold red]",
                                 style="red"))
             
     # Method that runs the whole pipeline
     async def run(self, query: str):
-        console = Console()
-        # Create a tree with a root node representing the entire pipeline.
+        # Create a layout for a tree and a progress bar
+        self.layout.split_column(
+            Layout(name="tree_section"),
+            Layout(name="progress_section", size=3)
+        )
+        # Create a tree with a root node representing the entire pipeline and a progress bar
         tree = Tree("[bold cyan]Pipeline Execution[/bold cyan]", guide_style="bold bright_blue")
+        # Add tree to layout, hide progress bar
+        self.layout["tree_section"].update(tree)
+        self.layout["progress_section"].visible = False
 
         def update_node(node: Tree, message: Union[Panel, str]):
             node.add(message)
 
-        with Live(tree, refresh_per_second=4, console=console):
+        live = Live(self.layout, refresh_per_second=4, console=self.console, transient=True)
+        live.start()
+        try:
             # Step 1: Query Analysis and Rewriting
             step1 = tree.add("[bold cyan]Step 1: Query Analysis and Rewriting[/bold cyan]")
             self.set_log_callback(lambda message: update_node(step1, message))   # set callback function
@@ -395,29 +439,37 @@ class Agent:
             step2 = tree.add("[bold yellow]Step 2: Extraction of Relevant Documents[/bold yellow]")
             self.set_log_callback(lambda message: update_node(step2, message))   # update callback function, now nodes are added to step2 subtree via self.log()
             documents_to_be_checked, documents_to_be_updated = await self.extract_relevant_documents(
-                query=rewritten_user_query, feature_changed=feature_changed
+                query=rewritten_user_query,
+                feature_changed=feature_changed,
+                cosine_min=self.cosine_sim_min,
+                score_min=self.score_min,
+                score_confident=self.score_confident
             )
 
             if len(documents_to_be_checked) == 0 and len(documents_to_be_updated) == 0:
                 self.log(Panel("[bold red]No documents that require update or check have been found.[/bold red]",
                                 style="red"))
                 
-                self.final_output_tree = tree
-                return
+                live.stop()
             else:
                 self.log(Panel(f"[bold]Documents to be checked:[/bold] {len(documents_to_be_checked)}", style="yellow"))
                 self.log(Panel(f"[bold]Documents to be updated:[/bold] {len(documents_to_be_updated)}", style="yellow"))
 
-            # Step 3: Update of Documents
-            step3 = tree.add("[bold green]Step 3: Updating/Checking Documents[/bold green]")
-            self.set_log_callback(lambda message: update_node(step3, message))  # update callback function
-            self.log(Panel("[bold]Proceeding to check/update documents...[/bold]", style="green"))
+            if live.is_started:
+                # Step 3: Update of Documents
+                step3 = tree.add("[bold green]Step 3: Updating/Checking Documents[/bold green]")
+                self.set_log_callback(lambda message: update_node(step3, message))  # update callback function
+                self.log(Panel("[bold]Proceeding to check/update documents...[/bold]", style="green"))
+                
+                await self.update_documents(
+                    documents_to_be_checked=documents_to_be_checked,
+                    documents_to_be_updated=documents_to_be_updated,
+                    query=rewritten_user_query
+                )
+                live.stop()
             
-            await self.update_documents(
-                documents_to_be_checked=documents_to_be_checked,
-                documents_to_be_updated=documents_to_be_updated,
-                query=rewritten_user_query
-            )
-        
-        # Save the entire tree structure
-        self.final_output_tree = tree
+            # Print the entire tree structure
+            self.final_output_tree = tree
+        except Exception as e:
+            live.stop()
+            raise e

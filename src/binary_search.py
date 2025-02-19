@@ -35,7 +35,7 @@ def min_threshold_for_group(token_counts: List[int], max_partitions: int, prompt
 
 def partition_documents(token_counts: List[int], threshold: int, prompt_token_count: int) -> List[Tuple[int, int]]:
     """
-    Function partiotioning the documents given token count threshold.
+    Function partitioning the documents given token count threshold.
     """
     partitions = []
     current_partition = []
@@ -87,7 +87,7 @@ def find_partitions(
             ))
         
         if find_best_thresholds == "minsum":
-            optimal_thresholds = min(filtered_thresholds, lambda x: x[0] + x[1])
+            optimal_thresholds = min(filtered_thresholds, key=lambda x: x[0] + x[1])
         elif find_best_thresholds == "minmax":
             optimal_thresholds = min(filtered_thresholds, key=lambda x: max(x[0], x[1]))
         elif find_best_thresholds == "minvariance":

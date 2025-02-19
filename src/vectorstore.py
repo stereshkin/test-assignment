@@ -8,22 +8,28 @@ import json
 import asyncio
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 import re
-import tqdm
+from src.base import BaseDisplayClass
 import numpy as np
 import tiktoken
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+from rich.layout import Layout
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 ENV_PATH = os.path.join(os.path.join(basedir, '..'), '.env')
 load_dotenv(ENV_PATH)
 
-class VectorStore:
+class VectorStore(BaseDisplayClass):
     def __init__(self,
                  dim: int,
                  embedding_model_name: str,
+                 console: Console,
+                 layout: Layout,
                  knowledge_file_path: str = "dune_docs.jsonl",
                  index_file_name: str = "documentation.index"
                  ):
         
+        super().__init__(console, layout)
         self.index = IndexIDMap2(IndexFlatIP(dim))
         self.index_path = os.path.abspath(os.path.join(
             os.path.dirname(__file__),
@@ -35,6 +41,7 @@ class VectorStore:
             '..',
             knowledge_file_path
         ))
+        self.json_documents = []
         self.client = OpenAI()
         self.embedding_model = embedding_model_name
         self.load_data()
@@ -80,8 +87,8 @@ class VectorStore:
     
     # Synchronous function with retry logic to get an embedding.
     @retry(wait=wait_random_exponential(min=1, max=20), stop=stop_after_attempt(6))
-    def _get_embeddings_batch(self, texts: List[str], model: str) -> List[List[float]]:
-        response = self.client.embeddings.create(input=texts, model=model)
+    def _get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        response = self.client.embeddings.create(input=texts, model=self.embedding_model)
         embeddings = np.array([item.embedding for item in response.data]).astype(np.float32)
         faiss.normalize_L2(embeddings)
 
@@ -90,16 +97,19 @@ class VectorStore:
     # Asynchronous wrapper that runs the synchronous function in a thread.
     async def _get_embeddings_batch_async(self,
                                    texts: List[str],
-                                   semaphore: asyncio.Semaphore,
-                                   model: str):
+                                   semaphore: asyncio.Semaphore):
         loop = asyncio.get_running_loop()
         async with semaphore:
-            return await loop.run_in_executor(None, self._get_embeddings_batch, texts, model)
+            return await loop.run_in_executor(None, self._get_embeddings_batch, texts)
     
     # Wrapper function that updates the progress bar after each task completes.
-    async def _get_embeddings_batch_async_wrapper(self, texts: List[str], model: str, semaphore: asyncio.Semaphore, pbar) -> List[List[float]]:
-        result = await self._get_embeddings_batch_async(texts, semaphore, model=model)
-        pbar.update(1)
+    async def _get_embeddings_batch_async_wrapper(self,
+                                                texts: List[str],
+                                                semaphore: asyncio.Semaphore,
+                                                progress: Progress,
+                                                task_id) -> List[List[float]]:
+        result = await self._get_embeddings_batch_async(texts, semaphore)
+        progress.advance(task_id)
         return result
     
     # Main asynchronous function to process the list of documents.
@@ -115,21 +125,32 @@ class VectorStore:
         batches = self._batch_documents(documents, token_limit=token_limit, allowed_api_calls=allowed_api_calls)
         semaphore = asyncio.Semaphore(max_concurrent)
         all_embeddings = []
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            transient=True,
+            console=self.console
+        )
+
+        self.layout["progress_section"].update(progress)
+        self.layout["progress_section"].visible = True
+
+        task_id = progress.add_task("Extracting embeddings (batches)", total=len(batches))
+        tasks = [
+            self._get_embeddings_batch_async_wrapper(batch, semaphore, progress, task_id)
+            for batch in batches
+        ]
+        batch_results = await asyncio.gather(*tasks)
+        for embeddings in batch_results:
+            all_embeddings.extend(embeddings)
         
-        with tqdm.tqdm(total=len(batches), desc="Extracting embeddings (batches)") as pbar:
-            tasks = [
-                self._get_embeddings_batch_async_wrapper(batch, self.embedding_model, semaphore, pbar)
-                for batch in batches
-            ]
-            # asyncio.gather preserves the order of batches.
-            batch_results = await asyncio.gather(*tasks)
-            for embeddings in batch_results:
-                all_embeddings.extend(embeddings)
         return all_embeddings
     
     # Load and clean data from Unicode characters
     def load_data(self) -> None:
-        self.json_documents = []
         with open(self.knowledge_file_path, "r") as f:
             for ind, line in enumerate(f):
                 document = json.loads(line)

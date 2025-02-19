@@ -27,12 +27,13 @@ prompt_updated_documents = """
     Guidelines:
 
     1. The documents are provided sequentially, each of them is a serialized into string JSON object which contains the following fields:
-        1) _id - the id of the document in the vectorstore;
+        1) ind - the id of the document in the vectorstore;
         2) content - the content of the document
         3) url - the URL to this document
     2. The documents are separated by two newlines.
     3. You need to update the content of each document.
-    4. Only return the updated documents, don't add anything else.
+    4. Process each document independently; do not carry over modifications from one document to another.
+    5. Only return the updated documents, don't add anything else.
 
 """
 
@@ -53,10 +54,11 @@ prompt_checked_documents = """
     Guidelines:
 
     1. The documents are provided sequentially, each of them is a serialized into string JSON object which contains the following fields:
-        1) _id - the id of the document in the vectorstore;
+        1) ind - the id of the document in the vectorstore;
         2) content - the content of the document
         3) url - the URL to this document
     2. The documents are separated by two newlines.
-    3. Only include the documents in your answer you decided to change.
-    4. Only return the documents you have updated, don't add anything else.
+    3. Process each document independently.
+    4. Only include the documents in your answer you decided to change.
+    5. Only return the documents you have updated, don't add anything else.
 """

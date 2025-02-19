@@ -1,4 +1,3 @@
-import json
 import os
 from src.vectorstore import VectorStore
 import numpy as np
@@ -25,22 +24,22 @@ class UpdateKnowledgeTool:
         # Update vector store
         new_documents = []
         ids = []
-        print(type(modified_knowledge))
-        print(type(modified_knowledge[0]))
+        
         for doc in modified_knowledge:
-            ids.append(doc["ind"])
+            ids.append(int(doc["ind"]))
             new_documents.append(doc["content_after"])
             vs.json_documents[int(doc["ind"])]["content"] = doc["content_after"]
         assert os.path.exists(vs.index_path)
         vs.index.remove_ids(np.array(ids))
-        new_embeddings = await vs.extract_embeddings(documents=new_documents, allowed_api_calls=self.allowed_api_calls)
+        new_embeddings = await vs.extract_embeddings(documents=new_documents,
+                                                    allowed_api_calls=self.allowed_api_calls)
         vs.index.add_with_ids(np.array(new_embeddings), ids)
         #faiss.write_index(vs.index, vs.index_path)
         # Update elasticsearch index if elasticsearch was used
         if elasticsearch_manager is not None:
             documents_to_be_removed = [
                 {
-                    "ind": doc["ind"],
+                    "ind": int(doc["ind"]),
                     "content": doc["content_before"],
                     "url": vs.json_documents[int(doc["ind"])]["url"]
                 }
@@ -48,7 +47,7 @@ class UpdateKnowledgeTool:
             ]
             documents_to_be_inserted = [
                 {
-                    "ind": doc["ind"],
+                    "ind": int(doc["ind"]),
                     "content": doc["content_after"],
                     "url": vs.json_documents[int(doc["ind"])]["url"]
                 }
@@ -57,7 +56,6 @@ class UpdateKnowledgeTool:
 
             elasticsearch_manager.remove_from_index(documents=documents_to_be_removed)
             elasticsearch_manager.add_to_index(documents=documents_to_be_inserted)
-        print(f"The vector store has been updated successfully!")
 
 
 class DisplayDiffTool:

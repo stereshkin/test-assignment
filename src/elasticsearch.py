@@ -38,3 +38,7 @@ class ElasticSearchManager:
             elastic_scores[int(hit["_id"])] = hit["_score"]
 
         return elastic_scores
+    
+    def get_all_ids(self) -> List[int]:
+        response = self.elastic_instance.search(index=self.index, body={"query": {"match_all": {}}}, size=2000)
+        return [int(hit["_id"]) for hit in response["hits"]["hits"]]
