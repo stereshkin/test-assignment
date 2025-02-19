@@ -60,8 +60,8 @@ class UpdateKnowledgeTool:
 
 class DisplayDiffTool:
     @staticmethod
-    def run(modified_knowledge: List[dict], group: Literal['check', 'update']) -> None:
-        console = Console()
+    def run(modified_knowledge: List[dict], group: Literal['check', 'update'], max_width: int = 1200, min_width: int = 100) -> None:
+        console = Console(width=1000)
         console.rule(f"[bold red]CHANGES FROM THE {group.upper()} GROUP[/bold red]")
 
         for doc in modified_knowledge:
@@ -80,9 +80,14 @@ class DisplayDiffTool:
             if not diff_text:
                 diff_text = "No changes detected."
             
-            syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=True)
-            panel = Panel(syntax, title="Diff", border_style="green")
-            console.print(panel)
+            lines = diff_text.splitlines()
+            max_line_length = max((len(line) for line in lines), default=0)
+
+            dynamic_width = max(min(max_line_length + 4, max_width), min_width)
+
+            syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=True, word_wrap=True)
+            panel = Panel(syntax, title="Diff", border_style="green", width=dynamic_width)
+            console.print(panel, soft_wrap=False)
             console.print("\n")
 
         

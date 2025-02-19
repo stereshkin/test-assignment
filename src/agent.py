@@ -43,7 +43,7 @@ class Agent(BaseDisplayClass):
             use_elastic_search: bool,
             cosine_sim_min: float = 0.1,
             score_min: float = 0.2,
-            score_confident: float = 0.7,
+            score_confident: float = 0.9,
             update_api_calls: int = 8,
             max_api_calls: int = 50,
             weight_elastic: Optional[float] = None,

@@ -59,6 +59,7 @@ prompt_checked_documents = """
         3) url - the URL to this document
     2. The documents are separated by two newlines.
     3. Process each document independently.
-    4. Only include the documents in your answer you decided to change.
-    5. Only return the documents you have updated, don't add anything else.
+    4. IMPORTANT: Only change the content of the document if you think it contains information that is directly related to the feature that was changed.
+    5. IMPORTANT: Only include those documents in your answer that you changed, don't copy unchanged documents.
+    6. IMPORTANT: Only return the documents you have updated, don't add anything else.
 """
