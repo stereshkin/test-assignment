@@ -34,7 +34,7 @@ class UpdateKnowledgeTool:
         new_embeddings = await vs.extract_embeddings(documents=new_documents,
                                                     allowed_api_calls=self.allowed_api_calls)
         vs.index.add_with_ids(np.array(new_embeddings), ids)
-        #faiss.write_index(vs.index, vs.index_path)
+        faiss.write_index(vs.index, vs.index_path)
         # Update elasticsearch index if elasticsearch was used
         if elasticsearch_manager is not None:
             documents_to_be_removed = [
