@@ -40,15 +40,12 @@ The project is structured into several key components:
 
 ## Possible improvements
 
-- **Human-in-the-loop:**
-
+- **Human-in-the-loop:**\
   It would be beneficial if the model decided if it should ask a human for the approval of the changes it has introduced in case it is not confident that these
   changes are necessary.
 
-- **Embeddings' Finetuning:** 
-
+- **Embeddings' Finetuning:**\
   It would be beneficial for the retrieval quality to finetune the embeddings on the documentation. Using a simple linear adapter would already yield some gains in terms of retrieval quality.
   
-- **Elasticsearch Hybrid Search:**
-
+- **Elasticsearch Hybrid Search:**\
   Using Elasticsearch Hybrid Search could possibly improve the score quality. There should be a better way to fuse semantic and BM25 scores.
